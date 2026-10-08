@@ -1,0 +1,12 @@
+[theme]
+# Màu theo nhận diện nhatot.com: cam chủ đạo, nền trắng, ô nhập xám nhạt, chữ #222
+base = "light"
+primaryColor = "#fa6819"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f4f4f4"   # ô nhập nền xám như ô tìm kiếm nhatot.com
+textColor = "#222222"
+font = "sans serif"
+
+[server]
+# Phục vụ ảnh minh hoạ trong thư mục static/ tại đường dẫn app/static/...
+enableStaticServing = true
