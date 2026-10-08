@@ -49,6 +49,14 @@ def load_scored():
 B = load_bundle()
 MODEL, SCORER, CH = B["model"], B["scorer"], B["choices"]
 SC = load_scored()
+
+
+@st.cache_resource(show_spinner=False)
+def load_lexicon():
+    """Từ điển âm tiết tiếng Việt (tiêu đề, mô tả, địa chỉ, loại hình…) để khôi phục chữ bị mất dấu trong file upload."""
+    cols = ["tieu_de", "mo_ta", "dia_chi", "loai_hinh", "giay_to_phap_ly", "huong_cua_chinh",
+            "tinh_trang_noi_that", "dac_diem"]
+    return csv_io.build_lexicon(pd.concat([SC[c] for c in cols]).fillna(""))
 QL = lambda q: core.QUAN_LABEL.get(q, q) if isinstance(q, str) else ""
 RQ = B["resid_q"]          # phân vị P10/P90 sai số model trên tập test -> khoảng ước tính 80%
 FEAT_LABEL = {"loai_hinh": "Loại hình", "phuong": "Phường", "quan": "Quận", "dien_tich_m2": "Diện tích",
@@ -346,7 +354,7 @@ elif choice == MENU[3]:
             '<div class="z-meta">Nhập thông tin → mô hình XGBoost ước tính giá. Nhập thêm giá bạn định đăng để kiểm tra '
             'có bị xem là bất thường không.</div>')
     st.write("")
-    tab1, tab2 = st.tabs(["Định giá 1 căn", "Định giá từ file CSV"])
+    tab1, tab2 = st.tabs(["Định giá 1 căn", "Định giá từ file CSV / Excel"])
     with tab1:
         left, right = st.columns([1.15, 1])
         with left, st.container(border=True, key="card_form"):
@@ -409,13 +417,15 @@ elif choice == MENU[3]:
     with tab2:
         st.markdown("Upload file CSV theo **định dạng tin đăng Nhà Tốt** (các cột `dien_tich`, `dia_chi`, "
                     "`loai_hinh`, `so_phong_ngu`…). File **không cần** cột giá.")
+        d1, d2 = st.columns(2)
+        with open(P("data", "sample_du_doan.xlsx"), "rb") as f:
+            d1.download_button("⬇️ File mẫu Excel", f, "sample_du_doan.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         with open(P("data", "sample_du_doan.csv"), "rb") as f:
-            st.download_button("⬇️ Tải file mẫu", f, "sample_du_doan.csv", "text/csv")
-        up = st.file_uploader("Chọn file CSV", type="csv", key="up_pred")
+            d2.download_button("⬇️ File mẫu CSV", f, "sample_du_doan.csv", "text/csv")
+        up = st.file_uploader("Chọn file CSV hoặc Excel (.xlsx)", type=["csv", "xlsx"], key="up_pred")
         if up is not None:
             try:
-                raw, enc, n_lost = csv_io.read_csv_any(up)
-                csv_io.warn_encoding(st, enc, n_lost)
+                raw = csv_io.load_upload(st, up, load_lexicon())
                 df = core.clean(raw, require_target=False) if core.is_raw(raw) else raw.copy()
                 miss = [c for c in core.FEATURES if c not in df.columns]
                 if miss:
@@ -445,14 +455,16 @@ elif choice == MENU[4]:
     ui.card('<div class="z-facts" style="margin:0;grid-template-columns:repeat(4,1fr)">'
             + "".join(f'<div class="z-fact"><div><small>{lab}</small>{txt}</div></div>' for _, lab, txt in SIGNALS)
             + "</div>")
+    d1, d2 = st.columns(2)
+    with open(P("data", "sample_co_gia.xlsx"), "rb") as f:
+        d1.download_button("⬇️ File mẫu Excel", f, "sample_co_gia.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     with open(P("data", "sample_co_gia.csv"), "rb") as f:
-        st.download_button("⬇️ Tải file mẫu", f, "sample_co_gia.csv", "text/csv")
-    up = st.file_uploader("Chọn file CSV có cột `gia_ban`", type="csv", key="up_anom")
+        d2.download_button("⬇️ File mẫu CSV", f, "sample_co_gia.csv", "text/csv")
+    up = st.file_uploader("Chọn file CSV hoặc Excel (.xlsx) có cột `gia_ban`", type=["csv", "xlsx"], key="up_anom")
     w, k = weights_widget("up")
     if up is not None:
         try:
-            raw, enc, n_lost = csv_io.read_csv_any(up)
-            csv_io.warn_encoding(st, enc, n_lost)
+            raw = csv_io.load_upload(st, up, load_lexicon())
             df = core.clean(raw, require_target=True) if core.is_raw(raw) else raw.copy()
             if "gia_ban_ty" not in df.columns or df["gia_ban_ty"].isna().all():
                 st.error("File phải có cột giá `gia_ban` (vd '3,85 tỷ').")
