@@ -6,6 +6,7 @@ import joblib
 import numpy as np
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 import nhatot_core as core
 import ui
@@ -49,6 +50,13 @@ MODEL, SCORER, CH = B["model"], B["scorer"], B["choices"]
 SC = load_scored()
 QL = lambda q: core.QUAN_LABEL.get(q, q) if isinstance(q, str) else ""
 RQ = B["resid_q"]          # phân vị P10/P90 sai số model trên tập test -> khoảng ước tính 80%
+FEAT_LABEL = {"loai_hinh": "Loại hình", "phuong": "Phường", "quan": "Quận", "dien_tich_m2": "Diện tích",
+              "giay_to_phap_ly": "Pháp lý", "so_phong_ngu_n": "Số phòng ngủ", "so_wc_n": "Số WC",
+              "tong_so_tang": "Số tầng", "chieu_ngang_m": "Chiều ngang", "chieu_dai_m": "Chiều dài",
+              "bdg_mean": "Đơn giá khu vực (TB)", "bdg_std": "Biến động giá khu vực",
+              "bdg_slope": "Xu hướng giá khu vực", "mo_ta_len": "Độ dài mô tả",
+              "co_mat_tien": "Từ khoá mặt tiền", "co_hem_xh": "Từ khoá hẻm xe hơi"}
+IMPORTANCE = B["importance"].rename(lambda f: FEAT_LABEL.get(f, f)).rename("mức quan trọng")
 
 MENU = ["🏠 Trang chủ", "🔎 Tìm nhà", "🏡 Chi tiết nhà", "💰 Định giá nhà",
         "🚨 Kiểm tra giá hàng loạt", "📊 Dữ liệu & mô hình", "👥 Nhóm thực hiện"]
@@ -135,6 +143,8 @@ st.sidebar.radio("Menu", MENU, key="nav", label_visibility="collapsed")
 st.sidebar.divider()
 ui.team_sidebar(TEAM)
 st.sidebar.caption("Đồ án tốt nghiệp Data Science — TTTH ĐH KHTN")
+st.sidebar.markdown('<div class="z-note">Sản phẩm học tập, dùng dữ liệu tin đăng Nhà Tốt cho mục đích nghiên cứu — '
+                    'không phải website chính thức của Nhà Tốt / Chợ Tốt.</div>', unsafe_allow_html=True)
 choice = ss.nav
 THR = SCORER.threshold()
 
@@ -152,7 +162,7 @@ if choice == MENU[0]:
             ("🔎", "Tìm nhà", "Lọc tin theo quận, phường, giá, số phòng — mỗi tin có nhãn giá tốt / bất thường.", MENU[1]),
             ("💰", "Định giá nhà", "Nhập thông tin căn nhà → giá ước tính AI, khoảng tham khảo và kiểm tra giá bạn định đăng.", MENU[3]),
             ("🚨", "Kiểm tra hàng loạt", "Upload file CSV tin đăng → chấm 4 tín hiệu bất thường cho từng tin.", MENU[4])]):
-        with col, st.container(border=True):
+        with col, st.container(border=True, key=f"card_home_{title}"):
             ui.html(f'<div style="font-size:2rem">{icon}</div><div class="z-h2" style="margin-top:4px">{title}</div>'
                     f'<div class="z-txt">{txt}</div>')
             st.button(f"Mở {title.lower()} →", key=f"home_{page}", on_click=go, args=(page,), type="primary")
@@ -221,13 +231,32 @@ elif choice == MENU[2]:
     ss.listing = int(sel)
     r = SC.loc[ss.listing]
     i = ss.listing
-    floors = r["tong_so_tang"] if pd.notna(r["tong_so_tang"]) else 2
-    ui.html('<div class="z-gal">'
-            + ui.tile(i, ui.house_svg(i, 240, floors), f"{r['loai_hinh']} · {ui.vn(r['dien_tich_m2'], 0)} m²")
-            + '<div class="r">'
-            + ui.tile(i + 1, '<span style="font-size:3rem">📍</span>', f"{r['phuong']}, {QL(r['quan'])}")
-            + ui.tile(i + 2, '<span style="font-size:3rem">📈</span>', "Lịch sử giá khu vực")
-            + "</div></div>")
+    try:
+        hist = [float(x) for x in ast.literal_eval(r["bieu_do_gia"])]
+    except Exception:
+        hist = []
+
+    # Dải ảnh: ảnh minh hoạ theo loại hình | Google Maps + biểu đồ lịch sử đơn giá khu vực
+    g1, g2 = st.columns([2, 1], gap="small")
+    with g1:
+        ui.html(f'<div class="z-photo" style="height:404px;background-image:url({ui.house_img(r["loai_hinh"], seed=i)})">'
+                f'<span class="cap">{escape(r["loai_hinh"])} · {ui.vn(r["dien_tich_m2"], 0)} m² · ảnh minh hoạ</span></div>')
+    with g2:
+        components.html(
+            f'<div style="position:relative"><iframe src="{ui.map_url(r["dia_chi"])}" loading="lazy" '
+            f'style="border:0;width:100%;height:190px;border-radius:12px" referrerpolicy="no-referrer-when-downgrade">'
+            f'</iframe><span style="position:absolute;left:10px;bottom:12px;background:rgba(255,255,255,.95);'
+            f'font:600 12px sans-serif;color:#2a2a33;border-radius:6px;padding:3px 9px">📍 {escape(str(r["phuong"]))}, '
+            f'{escape(QL(r["quan"]))}</span></div>', height=194)
+        if len(hist) >= 2:
+            ch = hist[-1] / hist[0] - 1
+            labels = [f"T-{len(hist) - 1 - k}" if k < len(hist) - 1 else "Nay" for k in range(len(hist))]
+            ui.html(f'<div class="z-chart" style="height:194px"><div class="t">Đơn giá khu vực 12 tháng · '
+                    f'<span style="color:{"#11734b" if ch >= 0 else "#d1242f"}">{ch:+.0%}</span></div>'
+                    + ui.line_svg(hist, labels, w=420, h=158) + "</div>")
+        else:
+            ui.html('<div class="z-chart" style="height:194px"><div class="t">Đơn giá khu vực 12 tháng</div>'
+                    '<div class="z-meta" style="margin-top:60px;text-align:center">Tin không có dữ liệu lịch sử giá</div></div>')
 
     main, side = st.columns([2.1, 1])
     with main:
@@ -268,19 +297,10 @@ elif choice == MENU[2]:
         ui.html('<div class="z-h2">Đánh giá giá đăng</div>')
         ui.card(price_check(r, THR))
 
-        ui.html('<div class="z-h2">Lịch sử đơn giá khu vực (12 tháng)</div>')
-        try:
-            hist = [float(x) for x in ast.literal_eval(r["bieu_do_gia"])]
-        except Exception:
-            hist = []
         if len(hist) >= 2:
-            labels = [f"{len(hist) - 1 - k} th trước" if k < len(hist) - 1 else "Hiện tại" for k in range(len(hist))]
-            ui.card(ui.line_svg(hist, labels))
-            ch = hist[-1] / hist[0] - 1
-            st.caption(f"Đơn giá/m² khu vực {'tăng' if ch >= 0 else 'giảm'} {abs(ch):.0%} trong 12 tháng · "
-                       f"tin này {ui.vn(r['don_gia_trm2'], 0)} tr/m² so với hiện tại {ui.vn(hist[-1], 0)} tr/m².")
-        else:
-            st.caption("Tin không có dữ liệu lịch sử giá khu vực.")
+            st.caption(f"Đơn giá/m² khu vực {'tăng' if hist[-1] >= hist[0] else 'giảm'} "
+                       f"{abs(hist[-1] / hist[0] - 1):.0%} trong 12 tháng · tin này {ui.vn(r['don_gia_trm2'], 0)} tr/m² "
+                       f"so với mức hiện tại của khu vực {ui.vn(hist[-1], 0)} tr/m².")
 
         ui.html('<div class="z-h2">Thông tin chi tiết</div>')
         rows = [("Diện tích đất", f"{ui.vn(r['dien_tich_m2'], 1)} m²"),
@@ -300,12 +320,12 @@ elif choice == MENU[2]:
         grid(same.loc[d.nsmallest(3).index], "sim")
 
     with side:
-        with st.container(border=True):
+        with st.container(border=True, key="card_agent"):
             ui.html(f'<div class="z-agent"><div class="z-ava">NT</div><div><div class="z-meta">Tin đăng trên</div>'
                     f'<b>Nhà Tốt · Chợ Tốt</b><div class="z-meta">Mã tin #{i}</div></div></div>')
             st.button("💰 Định giá căn tương tự", type="primary", width="stretch", on_click=go, args=(MENU[3],))
             st.button("🔎 Xem nhà cùng khu vực", width="stretch", on_click=go, args=(MENU[1],))
-        with st.container(border=True):
+        with st.container(border=True, key="card_loan"):
             ui.html('<div class="z-h2" style="margin-top:0;font-size:1.1rem">Ước tính trả góp</div>')
             down = st.slider("Trả trước (%)", 10, 90, 30, 5, key="m_down")
             rate = st.number_input("Lãi suất (%/năm)", 1.0, 20.0, 10.0, 0.5, key="m_rate")
@@ -325,7 +345,7 @@ elif choice == MENU[3]:
     tab1, tab2 = st.tabs(["Định giá 1 căn", "Định giá từ file CSV"])
     with tab1:
         left, right = st.columns([1.15, 1])
-        with left, st.container(border=True):
+        with left, st.container(border=True, key="card_form"):
             c1, c2 = st.columns(2)
             quan = c1.selectbox("Quận", CH["quan"], format_func=QL)
             phuong = c2.selectbox("Phường", CH["phuong_by_quan"][quan])
@@ -380,7 +400,7 @@ elif choice == MENU[3]:
                         'độ dài mô tả và từ khoá "mặt tiền" / "hẻm xe hơi".<br><br>Trên tập test: sai số trung bình '
                         f'<b>{ui.ty(B["metrics_test"]["MAE"])}</b>, R² <b>{ui.vn(B["metrics_test"]["R2"], 3)}</b>.</div>')
                 ui.html('<div class="z-h2" style="font-size:1.05rem">Đặc trưng quan trọng nhất</div>')
-                st.bar_chart(B["importance"].head(8).rename("importance"), horizontal=True, color=ui.BLUE, height=260)
+                st.bar_chart(IMPORTANCE.head(8), horizontal=True, sort=False, color=ui.ACCENT, height=260)
 
     with tab2:
         st.markdown("Upload file CSV theo **định dạng tin đăng Nhà Tốt** (các cột `dien_tich`, `dia_chi`, "
@@ -471,7 +491,7 @@ elif choice == MENU[5]:
         st.image(P("images", "bang_so_sanh_model.png"))
         st.image(P("images", "model_sklearn.png"), caption="So sánh model scikit-learn + dự đoán vs thực tế")
         st.subheader("Đặc trưng quan trọng nhất (XGBoost)")
-        st.bar_chart(B["importance"].head(12).rename("importance"), horizontal=True, color=ui.BLUE)
+        st.bar_chart(IMPORTANCE.head(12), horizontal=True, sort=False, color=ui.ACCENT)
     with t3:
         st.image(P("images", "anomaly_overview.png"), caption="Phân phối composite score và tin bị gắn cờ")
         st.image(P("images", "anomaly_jaccard.png"), caption="Mức độ đồng thuận giữa 4 tín hiệu")
