@@ -9,6 +9,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 import nhatot_core as core
+import csv_io
 import ui
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -413,7 +414,8 @@ elif choice == MENU[3]:
         up = st.file_uploader("Chọn file CSV", type="csv", key="up_pred")
         if up is not None:
             try:
-                raw = pd.read_csv(up)
+                raw, enc, n_lost = csv_io.read_csv_any(up)
+                csv_io.warn_encoding(st, enc, n_lost)
                 df = core.clean(raw, require_target=False) if core.is_raw(raw) else raw.copy()
                 miss = [c for c in core.FEATURES if c not in df.columns]
                 if miss:
@@ -449,7 +451,8 @@ elif choice == MENU[4]:
     w, k = weights_widget("up")
     if up is not None:
         try:
-            raw = pd.read_csv(up)
+            raw, enc, n_lost = csv_io.read_csv_any(up)
+            csv_io.warn_encoding(st, enc, n_lost)
             df = core.clean(raw, require_target=True) if core.is_raw(raw) else raw.copy()
             if "gia_ban_ty" not in df.columns or df["gia_ban_ty"].isna().all():
                 st.error("File phải có cột giá `gia_ban` (vd '3,85 tỷ').")
