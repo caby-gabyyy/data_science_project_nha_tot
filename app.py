@@ -69,6 +69,7 @@ def go(page, listing=None):
     ss.nav = page
     if listing is not None:
         ss.listing = int(listing)
+        ss._toast = f"Đã mở: {SC.at[int(listing), 'tieu_de'][:70]}"
 
 
 def predict(df):
@@ -127,12 +128,14 @@ def price_check(r, thr):
 
 
 def grid(rows, key, ncol=3):
+    """Lưới thẻ nhà. key != None -> cả thẻ bấm được: 1 nút trong suốt phủ lên thẻ (CSS st-key-open_*)."""
     cols = st.columns(ncol)
     for n, (i, r) in enumerate(rows.iterrows()):
-        with cols[n % ncol]:
+        with cols[n % ncol], st.container(key=f"lc_{key}_{i}" if key else None):
             ui.listing_card(r, int(i), QL(r.get("quan")))
             if key:
-                st.button("Xem chi tiết →", key=f"{key}_{i}", on_click=go, args=(MENU[2], i), type="tertiary")
+                st.button(f"Xem chi tiết: {r['tieu_de'][:60]}", key=f"open_{key}_{i}",
+                          on_click=go, args=(MENU[2], i))
 
 
 # ======================================================================
@@ -509,3 +512,18 @@ else:
             ui.card(f'<div class="z-agent"><div class="z-ava" style="width:56px;height:56px">{escape(ini)}</div><div>'
                     f'<b style="font-size:1.15rem">{escape(m["ten"])}</b><div class="z-meta">📧 {escape(m["email"])}</div>'
                     f'</div></div><div class="z-txt" style="margin-top:10px"><b>Phụ trách:</b> {escape(m["viec"])}</div>')
+
+# ======================================================================
+# Phản hồi điều hướng: thông báo "Đã mở …" + cuộn lên đầu trang khi đổi trang / đổi tin
+# ======================================================================
+if "_toast" in ss:
+    st.toast(ss.pop("_toast"), icon="🏡")
+view = (ss.nav, ss.listing if ss.nav == MENU[2] else None)
+if ss.get("_last_view") != view:
+    ss._last_view = view
+    ss._scroll_n = ss.get("_scroll_n", 0) + 1     # nội dung khác nhau mỗi lần -> script chạy lại
+    components.html(
+        f"<script>/* {ss._scroll_n} */ const d = window.parent.document;"
+        "for (const s of ['[data-testid=\"stMain\"]', '[data-testid=\"stAppViewContainer\"]', 'section.main']) {"
+        "  const el = d.querySelector(s); if (el) el.scrollTo({top: 0, behavior: 'smooth'}); }"
+        "window.parent.scrollTo({top: 0, behavior: 'smooth'});</script>", height=0)

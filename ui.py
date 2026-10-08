@@ -58,7 +58,7 @@ section[data-testid="stSidebar"]{background:#fff;border-right:1px solid var(--li
 .z-badge{display:inline-block;font-size:.75rem;font-weight:600;border-radius:4px;padding:2px 8px}
 .z-good{background:#e3f5ec;color:#11734b}.z-hi{background:var(--accent-soft);color:#b04a0c}.z-mid{background:#eeeeee;color:var(--muted2)}
 .z-bad{background:#fde8ee;color:#c4123f}
-.z-lcard{background:#fff;border:1px solid var(--line);border-radius:12px;overflow:hidden;margin-bottom:6px}
+.z-lcard{background:#fff;border:1px solid var(--line);border-radius:12px;overflow:hidden;margin-bottom:14px}
 .z-lcard .img{height:160px;position:relative;background-size:cover;background-position:center}
 .z-lcard .img .z-badge{position:absolute;left:10px;top:10px}
 .z-lcard .bd{padding:10px 12px}
@@ -82,6 +82,22 @@ section[data-testid="stSidebar"]{background:#fff;border-right:1px solid var(--li
 .z-kpi b{display:block;font-size:1.4rem;color:var(--ink);margin-top:2px}
 .z-team{font-size:.85rem;line-height:1.45}
 .z-note{font-size:.75rem;color:var(--muted);line-height:1.4}
+/* Phản hồi khi đang tải: thanh cam chạy ở đầu trang + nội dung cũ mờ đi */
+.stApp[data-test-script-state="running"]::before{content:"";position:fixed;top:0;left:0;height:4px;width:40%;
+  z-index:1000000;border-radius:0 4px 4px 0;background:linear-gradient(90deg,#ff8800,#fa6819);
+  animation:z-load 0.9s ease-in-out infinite}
+@keyframes z-load{0%{left:-40%}100%{left:100%}}
+.stApp[data-test-script-state="running"] [data-stale="true"]{opacity:.45;transition:opacity .15s}
+/* Cả thẻ nhà bấm được: nút trong suốt phủ kín thẻ + hiệu ứng nổi khi rê chuột, lún xuống khi nhấn */
+[class*="st-key-lc_"]{position:relative}
+[class*="st-key-lc_"] .z-lcard{transition:box-shadow .15s ease,transform .15s ease}
+[class*="st-key-lc_"]:hover .z-lcard{box-shadow:0 6px 18px rgba(0,0,0,.12);transform:translateY(-2px)}
+[class*="st-key-lc_"]:hover .z-lcard .t{color:var(--accent)}
+[class*="st-key-lc_"]:active .z-lcard{transform:scale(.97);box-shadow:0 2px 6px rgba(250,104,25,.35);
+  border-color:var(--accent)}
+[class*="st-key-open_"]{position:absolute !important;inset:0;z-index:5;width:100% !important;margin:0 !important}
+[class*="st-key-open_"] div[data-testid="stButton"],[class*="st-key-open_"] button{width:100% !important;
+  height:100% !important;min-height:100%;opacity:0;cursor:pointer;padding:0;border:0}
 /* Nút bo tròn kiểu viên thuốc như nhatot.com */
 div[data-testid="stButton"] button,div[data-testid="stFormSubmitButton"] button,
 div[data-testid="stDownloadButton"] button{border-radius:999px;font-weight:600}
