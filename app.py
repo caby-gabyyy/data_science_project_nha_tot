@@ -58,7 +58,11 @@ def load_lexicon():
             "tinh_trang_noi_that", "dac_diem"]
     return csv_io.build_lexicon(pd.concat([SC[c] for c in cols]).fillna(""))
 QL = lambda q: core.QUAN_LABEL.get(q, q) if isinstance(q, str) else ""
-RQ = B["resid_q"]          # phân vị P10/P90 sai số model trên tập test -> khoảng ước tính 80%
+RQ = B["resid_q"]          # (cũ) phân vị P10/P90 sai số tuyệt đối trên tập test
+# Khoảng 80% theo TỈ LỆ giá thật / giá dự đoán (dự đoán out-of-fold của toàn bộ dữ liệu). Sai số tuyệt đối cố định
+# phủ 96% nhà <5 tỷ nhưng chỉ 32% nhà >12 tỷ; dùng tỉ lệ thì đều hơn (83% / 84% / 76% / 65%), kiểm bằng chia đôi dữ liệu.
+_ratio = (SC["gia_ban_ty"] / SC["y_pred"]).clip(lower=1e-3)
+R10, R90 = float(_ratio.quantile(0.10)), float(_ratio.quantile(0.90))
 FEAT_LABEL = {"loai_hinh": "Loại hình", "phuong": "Phường", "quan": "Quận", "dien_tich_m2": "Diện tích",
               "giay_to_phap_ly": "Pháp lý", "so_phong_ngu_n": "Số phòng ngủ", "so_wc_n": "Số WC",
               "tong_so_tang": "Số tầng", "chieu_ngang_m": "Chiều ngang", "chieu_dai_m": "Chiều dài",
@@ -87,7 +91,7 @@ def predict(df):
 
 
 def est_range(pred):
-    return max(pred + RQ["p10"], 0.1), pred + RQ["p90"]
+    return max(pred * R10, 0.1), pred * R90
 
 
 def weights_widget(key):
@@ -133,7 +137,7 @@ def price_check(r, thr):
             + (("Tín hiệu vượt ngưỡng: " + "; ".join(why) + ".") if why else "Không tín hiệu nào vượt ngưỡng.")
             + "</div>" + ui.range_bar(lo, hi, r["y_pred"], r["gia_ban_ty"])
             + f'<div class="z-dl">{sig}<div><span>Composite score</span><b>{r["total_score"]:.3f}</b></div>'
-            f'<div><span>Ngưỡng gắn cờ (top-5%)</span><b>{thr:.3f}</b></div></div>')
+            f'<div><span>Ngưỡng gắn cờ (mốc top 5% composite)</span><b>{thr:.3f}</b></div></div>')
 
 
 def grid(rows, key, ncol=3):
@@ -398,7 +402,7 @@ elif choice == MENU[3]:
                         f'đơn giá <b>{ui.vn(pred * 1000 / dt, 1)} tr/m²</b> · trả góp ~'
                         f'<b>{ui.vn(ui.monthly(pred), 0)} tr/tháng</b></div>'
                         + ui.range_bar(lo, hi, pred, gia_dang if gia_dang > 0 else None)
-                        + '<div class="z-meta">Khoảng 80% = giá ước tính + phân vị P10–P90 sai số model trên tập test.</div>')
+                        + '<div class="z-meta">Khoảng 80% = giá ước tính × (P10–P90 của tỉ lệ giá thật / giá dự đoán, out-of-fold). Là khoảng tham khảo: phủ ~84% nhà dưới 8 tỷ, ~76% nhà 8–12 tỷ, ~65% nhà trên 12 tỷ.</div>')
                 if gia_dang > 0:
                     row["don_gia_trm2"] = gia_dang * 1000 / dt
                     out, thr = SCORER.score(row, yp)
@@ -407,7 +411,7 @@ elif choice == MENU[3]:
                     ui.card(price_check(rr, thr))
             else:
                 ui.card('<div class="z-h2" style="margin-top:0">Cách ước tính</div><div class="z-txt">'
-                        'Mô hình <b>XGBoost</b> học từ 7.878 tin rao bán với 16 đặc trưng: diện tích, số phòng, '
+                        'Mô hình <b>XGBoost</b> học từ 7.878 tin rao bán (6.302 train / 1.576 test) với 16 đặc trưng: diện tích, số phòng, '
                         'số tầng, kích thước, loại hình, pháp lý, phường/quận, lịch sử đơn giá khu vực 12 tháng, '
                         'độ dài mô tả và từ khoá "mặt tiền" / "hẻm xe hơi".<br><br>Trên tập test: sai số trung bình '
                         f'<b>{ui.ty(B["metrics_test"]["MAE"])}</b>, R² <b>{ui.vn(B["metrics_test"]["R2"], 3)}</b>.</div>')
@@ -496,7 +500,7 @@ elif choice == MENU[4]:
 # ----------------------------------------------------------------------
 elif choice == MENU[5]:
     ui.html('<div class="z-h2" style="font-size:1.9rem;margin-top:0">Dữ liệu & kết quả mô hình</div>'
-            '<div class="z-meta">EDA · so sánh 8 mô hình (4 scikit-learn + 4 PySpark) · 4 phương pháp phát hiện bất thường</div>')
+            '<div class="z-meta">EDA · so sánh các mô hình scikit-learn (PySpark chạy trong notebook) · 4 phương pháp phát hiện bất thường</div>')
     t1, t2, t3 = st.tabs(["Khám phá dữ liệu", "So sánh mô hình", "Phát hiện bất thường"])
     with t1:
         st.image(P("images", "eda_target.png"), caption="Phân phối giá bán — lệch phải mạnh")
@@ -504,11 +508,16 @@ elif choice == MENU[5]:
         st.image(P("images", "eda_corr.png"), caption="Tương quan giữa các biến số")
         st.image(P("images", "wordcloud_mo_ta.png"), caption="Wordcloud cột mô tả")
     with t2:
-        st.markdown("**XGBoost** cho RMSE thấp nhất → chọn để triển khai.")
+        st.markdown("**XGBoost** cho RMSE thấp nhất → chọn để triển khai. Đánh giá trên 20% dữ liệu giữ lại (tách ngẫu nhiên). "
+                    "Lưu ý: bảng chỉ có mô hình scikit-learn; kết quả PySpark nằm trong notebook.")
+        st.caption("Mô hình nên được so với mốc đơn giản (ví dụ trung vị giá theo quận/phường/loại hình) để thấy giá trị tăng thêm. "
+                   "Dữ liệu 7.926 tin: 7.878 tin dùng để học (sau khi loại giá cực đoan), "
+                   "6.302 train / 1.576 test.")
         st.dataframe(pd.read_csv(P("data", "bang_so_sanh_model.csv")).round(3), width="stretch", hide_index=True)
         st.image(P("images", "bang_so_sanh_model.png"))
         st.image(P("images", "model_sklearn.png"), caption="So sánh model scikit-learn + dự đoán vs thực tế")
-        st.subheader("Đặc trưng quan trọng nhất (XGBoost)")
+        st.subheader("Đặc trưng quan trọng nhất (XGBoost, theo gain)")
+        st.caption("Tính theo gain và cộng dồn các cột one-hot nên đề cao biến phân loại (loại hình, phường, quận). Kiểm bằng permutation importance trên tập test thì diện tích quan trọng nhất. Chỉ đọc là thứ hạng tương đối, không phải quan hệ nhân quả.")
         st.bar_chart(IMPORTANCE.head(12), horizontal=True, sort=False, color=ui.ACCENT)
     with t3:
         st.image(P("images", "anomaly_overview.png"), caption="Phân phối composite score và tin bị gắn cờ")
