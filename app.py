@@ -1,4 +1,5 @@
 import ast
+import json
 import os
 from html import escape
 
@@ -88,6 +89,44 @@ def go(page, listing=None):
 def predict(df):
     df = core.fill_bdg_from_area(df, B["bdg_table"])
     return df, np.clip(MODEL.predict(df[core.FEATURES]), 0.05, None)
+
+
+APP_MODEL = "XGBoost"      # model đang chạy trên app (bundle từ train_models.py)
+
+
+@st.cache_data
+def load_ket_luan():
+    """Kết luận so sánh mô hình do notebook xuất ra (Mục 9.4). Không có file -> None."""
+    try:
+        with open(P("data", "ket_luan_model.json"), encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def ket_luan_md(kl, bang):
+    """Câu kết luận tab So sánh mô hình, lấy từ notebook (Mục 9.2) chứ không gõ cứng."""
+    co_spark = (bang["env"] != "scikit-learn").any()
+    nguon = ("Mọi mô hình đánh giá trên cùng 20% dữ liệu giữ lại"
+             + (" (scikit-learn và PySpark dùng chung một cách chia)." if co_spark
+                else ". Bảng chỉ có mô hình scikit-learn; kết quả PySpark nằm trong notebook."))
+    if not kl:   # chưa có file kết luận -> chỉ nói điều bảng chứng minh được
+        top = bang.sort_values("RMSE").iloc[0]
+        return f"**{top['model']}** có RMSE thấp nhất trên lần chia này. {nguon}"
+    n = len(kl["seeds"])
+    if kl["dang_ke"]:
+        top = kl["de_xuat"]["model"]
+        cach = (f"thắng ở cả {n}/{n} cách chia dữ liệu khi so cặp trên cùng tập test"
+                if top == kl["so_cap_voi"] else   # model đã chạy lại trên n cách chia
+                f"chênh với hạng 2 lớn hơn ngưỡng nhiễu ước tính {ui.vn(kl['bien_do'], 3)} tỷ")
+        return f"**{top}** tốt hơn mọi mô hình khác **vượt mức nhiễu** ({cach}) → chọn để triển khai. {nguon}"
+    ngang = [x["model"] for x in kl["ngang"]]
+    # Trong nhóm ngang nhau, chọn model nào cũng hợp lệ -> nói đúng model app đang chạy
+    chon = APP_MODEL if APP_MODEL in ngang else kl["de_xuat"]["model"]
+    return (f"Nhóm dẫn đầu **ngang nhau**: {', '.join(ngang)}. Chênh lệch giữa các mô hình "
+            f"này không vượt mức nhiễu (so cặp trên {n} cách chia dữ liệu, xem bảng bên dưới). App dùng "
+            f"**{chon}** (trong nhóm dẫn đầu, giải thích được, chạy nhanh trong web app), "
+            f"không phải vì chính xác hơn hẳn. {nguon}")
 
 
 def est_range(pred):
@@ -499,8 +538,13 @@ elif choice == MENU[4]:
 
 # ----------------------------------------------------------------------
 elif choice == MENU[5]:
+    BANG = pd.read_csv(P("data", "bang_so_sanh_model.csv"))
+    KL = load_ket_luan()
+    _spark = (BANG["env"] != "scikit-learn").any()
     ui.html('<div class="z-h2" style="font-size:1.9rem;margin-top:0">Dữ liệu & kết quả mô hình</div>'
-            '<div class="z-meta">EDA · so sánh các mô hình scikit-learn (PySpark chạy trong notebook) · 4 phương pháp phát hiện bất thường</div>')
+            '<div class="z-meta">EDA · so sánh các mô hình scikit-learn '
+            + ("và PySpark" if _spark else "(PySpark chạy trong notebook)")
+            + ' · 4 phương pháp phát hiện bất thường</div>')
     t1, t2, t3 = st.tabs(["Khám phá dữ liệu", "So sánh mô hình", "Phát hiện bất thường"])
     with t1:
         st.image(P("images", "eda_target.png"), caption="Phân phối giá bán — lệch phải mạnh")
@@ -508,12 +552,38 @@ elif choice == MENU[5]:
         st.image(P("images", "eda_corr.png"), caption="Tương quan giữa các biến số")
         st.image(P("images", "wordcloud_mo_ta.png"), caption="Wordcloud cột mô tả")
     with t2:
-        st.markdown("**XGBoost** cho RMSE thấp nhất → chọn để triển khai. Đánh giá trên 20% dữ liệu giữ lại (tách ngẫu nhiên). "
-                    "Lưu ý: bảng chỉ có mô hình scikit-learn; kết quả PySpark nằm trong notebook.")
-        st.caption("Mô hình nên được so với mốc đơn giản (ví dụ trung vị giá theo quận/phường/loại hình) để thấy giá trị tăng thêm. "
-                   "Dữ liệu 7.926 tin: 7.878 tin dùng để học (sau khi loại giá cực đoan), "
-                   "6.302 train / 1.576 test.")
-        st.dataframe(pd.read_csv(P("data", "bang_so_sanh_model.csv")).round(3), width="stretch", hide_index=True)
+        st.markdown(ket_luan_md(KL, BANG))
+        bang_hien = BANG
+        if KL:
+            bl = KL["baseline"]
+            bang_hien = pd.concat([BANG, pd.DataFrame([{
+                "env": "Mốc so sánh", "model": "Baseline (đơn giá phường × m²)",
+                "MAE": bl["MAE"], "RMSE": bl["RMSE"], "R2": bl["R2"], "MAPE_%": bl["MAPE_%"]}])],
+                ignore_index=True)
+            if "hạng" in bang_hien:
+                bang_hien["hạng"] = bang_hien["hạng"].astype("Int64")
+            st.caption(f"Mốc so sánh: {bl['mo_ta']}. {KL['cai_thien_model']} giảm RMSE "
+                       f"{ui.vn(KL['cai_thien_baseline_pct'], 1)}% so với mốc này.")
+        st.caption("Dữ liệu 7.926 tin: 7.878 tin dùng để học (sau khi loại giá cực đoan), 6.302 train / 1.576 test.")
+        if KL and APP_MODEL not in [x["model"] for x in KL["ngang"]] \
+                and KL["de_xuat"]["model"].replace("_tuned", "") != APP_MODEL:
+            st.caption(f"Lưu ý: notebook đề xuất {KL['de_xuat']['model']} ({KL['de_xuat']['env']}), "
+                       f"app hiện chạy {APP_MODEL}.")
+        st.dataframe(bang_hien.round(3), width="stretch", hide_index=True)
+        st.caption(f"Số ở trang chủ (R² {ui.vn(B['metrics_test']['R2'], 3)}) là của model đang chạy trên app, "
+                   "huấn luyện riêng bằng train_models.py; bảng trên là kết quả notebook. "
+                   "Hai lần huấn luyện khác nhau nên số chênh nhẹ.")
+        if KL and KL["so_cap"]:
+            n = len(KL["seeds"])
+            with st.expander(f"Chênh lệch có vượt nhiễu không? (so cặp trên {n} cách chia dữ liệu)"):
+                st.caption(f"Mỗi cách chia, mọi mô hình dùng chung một tập test; cột chênh = RMSE đối thủ − RMSE "
+                           f"{KL['so_cap_voi']} (dương nghĩa là {KL['so_cap_voi']} tốt hơn). Chỉ coi là "
+                           f"thực sự tốt hơn khi thắng cả {n}/{n} lần.")
+                st.dataframe(pd.DataFrame([{
+                    "Đối thủ": x["doi_thu"], "Chênh RMSE TB (tỷ)": round(x["chenh_tb"], 3),
+                    "Độ lệch chuẩn (tỷ)": round(x["std_chenh"], 3), f"{KL['so_cap_voi']} thắng": x["thang"],
+                    "Thắng vững": "Có" if x["vung"] else "Không"} for x in KL["so_cap"]]),
+                    width="stretch", hide_index=True)
         st.image(P("images", "bang_so_sanh_model.png"))
         st.image(P("images", "model_sklearn.png"), caption="So sánh model scikit-learn + dự đoán vs thực tế")
         st.subheader("Đặc trưng quan trọng nhất (XGBoost, theo gain)")
