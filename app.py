@@ -1,6 +1,8 @@
 import ast
+import hmac
 import json
 import os
+from datetime import datetime
 from html import escape
 
 import joblib
@@ -59,7 +61,6 @@ def load_lexicon():
             "tinh_trang_noi_that", "dac_diem"]
     return csv_io.build_lexicon(pd.concat([SC[c] for c in cols]).fillna(""))
 QL = lambda q: core.QUAN_LABEL.get(q, q) if isinstance(q, str) else ""
-RQ = B["resid_q"]          # (cũ) phân vị P10/P90 sai số tuyệt đối trên tập test
 # Khoảng 80% theo TỈ LỆ giá thật / giá dự đoán (dự đoán out-of-fold của toàn bộ dữ liệu). Sai số tuyệt đối cố định
 # phủ 96% nhà <5 tỷ nhưng chỉ 32% nhà >12 tỷ; dùng tỉ lệ thì đều hơn (83% / 84% / 76% / 65%), kiểm bằng chia đôi dữ liệu.
 _ratio = (SC["gia_ban_ty"] / SC["y_pred"]).clip(lower=1e-3)
@@ -72,11 +73,68 @@ FEAT_LABEL = {"loai_hinh": "Loại hình", "phuong": "Phường", "quan": "Quậ
               "co_mat_tien": "Từ khoá mặt tiền", "co_hem_xh": "Từ khoá hẻm xe hơi"}
 IMPORTANCE = B["importance"].rename(lambda f: FEAT_LABEL.get(f, f)).rename("mức quan trọng")
 
-MENU = ["🏠 Trang chủ", "🔎 Tìm nhà", "🏡 Chi tiết nhà", "💰 Định giá nhà",
-        "🚨 Kiểm tra giá hàng loạt", "📊 Dữ liệu & mô hình", "👥 Nhóm thực hiện"]
+# ======================================================================
+# Trang & phân quyền
+#   Người bán   : (a) gợi ý giá đăng bán hợp lý — KHÔNG thấy điểm bất thường, ngưỡng, 4 tín hiệu
+#                 (biết ngưỡng thì có thể hạ giá vừa dưới ngưỡng để né kiểm duyệt).
+#   Kiểm duyệt  : (b) hàng đợi tin bị gắn cờ, xem đủ tín hiệu, ra quyết định.
+# Điều hướng theo TÊN trang (không theo vị trí trong menu) vì mỗi vai trò có menu riêng.
+# ======================================================================
+PG_HOME_BAN = "🏠 Trang chủ"
+PG_DINH_GIA = "💰 Định giá nhà"
+PG_THAM_KHAO = "🔎 Tham khảo giá khu vực"
+PG_CHI_TIET = "🏡 Chi tiết nhà"
+PG_HOME_KD = "📋 Tổng quan kiểm duyệt"
+PG_HANG_DOI = "🚩 Hàng đợi duyệt"
+PG_BATCH = "🚨 Kiểm tra giá hàng loạt"
+PG_TAT_CA = "🔎 Tất cả tin đăng"
+PG_NHAT_KY = "📒 Nhật ký duyệt"
+PG_DATA = "📊 Dữ liệu & mô hình"
+PG_TEAM = "👥 Nhóm thực hiện"
+
+ROLE_BAN, ROLE_KD = "🏠 Người bán", "🛡️ Kiểm duyệt viên"
+MENU = {ROLE_BAN: [PG_HOME_BAN, PG_DINH_GIA, PG_THAM_KHAO, PG_CHI_TIET, PG_DATA, PG_TEAM],
+        ROLE_KD: [PG_HOME_KD, PG_HANG_DOI, PG_CHI_TIET, PG_BATCH, PG_TAT_CA, PG_DINH_GIA, PG_NHAT_KY,
+                  PG_DATA, PG_TEAM]}
+
+QD = {"duyet": ("✓ Duyệt — giá hợp lệ", "z-good"),
+      "hoi_lai": ("↩ Hỏi lại người bán", "z-hi"),
+      "tu_choi": ("✗ Từ chối / gỡ tin", "z-bad")}
+
 ss = st.session_state
-ss.setdefault("nav", MENU[0])
-ss.setdefault("listing", int(SC.index[0]))
+ss.setdefault("role_pick", ROLE_BAN)
+ss.setdefault("mod_ok", False)
+ss.setdefault("nav", PG_HOME_BAN)
+ss.setdefault("dec", {})          # {mã tin: {"qd", "ghi_chu", "luc"}} — chỉ sống trong phiên làm việc
+
+
+def _mod_code():
+    """Mã truy cập kiểm duyệt: lấy từ Secrets của Streamlit Cloud; chưa đặt -> mã demo (hiện gợi ý trên màn hình)."""
+    try:
+        return str(st.secrets["MOD_CODE"]), True
+    except Exception:
+        return "kiemduyet2026", False
+
+
+ROLE = ROLE_KD if (ss.role_pick == ROLE_KD and ss.mod_ok) else ROLE_BAN
+IS_KD = ROLE == ROLE_KD
+# Người bán không thấy tin đang chờ kiểm duyệt; tin bị gắn cờ nhưng đã được DUYỆT thì hiển thị lại
+DA_DUYET = [i for i, d in ss.dec.items() if d["qd"] == "duyet"]
+VIEW = SC if IS_KD else SC[(SC.flag_bat_thuong == 0) | SC.index.isin(DA_DUYET)]
+if ss.nav not in MENU[ROLE]:
+    ss.nav = MENU[ROLE][0]
+if "listing" not in ss or ss.listing not in VIEW.index:
+    ss.listing = int(VIEW.index[0])
+
+
+def on_role_change():
+    ss.nav = PG_HOME_KD if (ss.role_pick == ROLE_KD and ss.mod_ok) else PG_HOME_BAN
+
+
+def logout():
+    ss.mod_ok = False
+    ss.role_pick = ROLE_BAN
+    ss.nav = PG_HOME_BAN
 
 
 def go(page, listing=None):
@@ -84,6 +142,28 @@ def go(page, listing=None):
     if listing is not None:
         ss.listing = int(listing)
         ss._toast = f"Đã mở: {SC.at[int(listing), 'tieu_de'][:70]}"
+
+
+def queue():
+    """Hàng đợi kiểm duyệt: tin bị gắn cờ, chưa xử lý trước, điểm cao trước."""
+    q = SC[SC.flag_bat_thuong == 1].copy()
+    q["da_xu_ly"] = q.index.isin(list(ss.dec))
+    return q.sort_values(["da_xu_ly", "total_score"], ascending=[True, False])
+
+
+def decide(i, qd):
+    ss.dec[int(i)] = {"qd": qd, "ghi_chu": ss.get(f"note_{i}", "").strip(),
+                      "luc": datetime.now().strftime("%H:%M:%S %d/%m/%Y")}
+    ss._toast = f"{QD[qd][0]} · tin #{i}"
+    nxt = queue()
+    nxt = nxt[~nxt.da_xu_ly]
+    if len(nxt):
+        ss.listing = int(nxt.index[0])
+
+
+def dec_badge(i):
+    d = ss.dec.get(int(i))
+    return f'<span class="z-badge {QD[d["qd"]][1]}">{QD[d["qd"]][0]}</span>' if d else None
 
 
 def predict(df):
@@ -158,7 +238,7 @@ SIGNALS = [("s_resid", "Residual-z", "giá lệch xa giá mô hình dự đoán"
 
 
 def price_check(r, thr):
-    """Khối 'Đánh giá giá đăng': thanh so sánh + kết luận + 4 tín hiệu."""
+    """[Kiểm duyệt] Khối 'Đánh giá giá đăng': thanh so sánh + kết luận + 4 tín hiệu + composite + ngưỡng."""
     lo, hi = est_range(r["y_pred"])
     lech = r["gia_ban_ty"] / r["y_pred"] - 1
     if r["flag_bat_thuong"] == 1:
@@ -179,53 +259,85 @@ def price_check(r, thr):
             f'<div><span>Ngưỡng gắn cờ (mốc top 5% composite)</span><b>{thr:.3f}</b></div></div>')
 
 
-def grid(rows, key, ncol=3):
+def price_check_ban(r):
+    """[Người bán] Chỉ kết luận + gợi ý khoảng giá. Không lộ điểm, ngưỡng hay tín hiệu nào vượt ngưỡng."""
+    lo, hi = est_range(r["y_pred"])
+    gia = r["gia_ban_ty"]
+    lech = gia / r["y_pred"] - 1
+    if r["flag_bat_thuong"] == 1:
+        verdict = '<span class="z-badge z-bad">Giá lệch nhiều so với thị trường</span>'
+        msg = ("Tin đăng với mức giá này sẽ được <b>đội kiểm duyệt xem trước khi hiển thị</b>. "
+               f"Gợi ý: điều chỉnh về khoảng <b>{ui.vn(lo, 2)} – {ui.ty(hi)}</b>. Nếu căn nhà có điểm đặc biệt "
+               "(mặt tiền kinh doanh, hẻm xe hơi, nội thất cao cấp…), hãy ghi rõ trong mô tả để kiểm duyệt viên đối chiếu.")
+    elif lo <= gia <= hi:
+        verdict = '<span class="z-badge z-good">✓ Giá hợp lý</span>'
+        msg = "Giá bạn định đăng nằm trong khoảng tham khảo của các căn tương tự."
+    elif gia > hi:
+        verdict = '<span class="z-badge z-hi">Cao hơn khoảng tham khảo</span>'
+        msg = (f"Giá cao hơn ước tính <b>{lech:.0%}</b>; tin có thể lâu bán hơn. "
+               f"Khoảng tham khảo: <b>{ui.vn(lo, 2)} – {ui.ty(hi)}</b>.")
+    else:
+        verdict = '<span class="z-badge z-hi">Thấp hơn khoảng tham khảo</span>'
+        msg = (f"Giá thấp hơn ước tính <b>{-lech:.0%}</b>; bạn có thể đang bán dưới giá thị trường. "
+               f"Khoảng tham khảo: <b>{ui.vn(lo, 2)} – {ui.ty(hi)}</b>.")
+    return (f'{verdict}<div class="z-txt" style="margin-top:8px">{msg}</div>'
+            + ui.range_bar(lo, hi, r["y_pred"], gia))
+
+
+def grid(rows, key, ncol=3, badge=None):
     """Lưới thẻ nhà. key != None -> cả thẻ bấm được: 1 nút trong suốt phủ lên thẻ (CSS st-key-open_*)."""
     cols = st.columns(ncol)
     for n, (i, r) in enumerate(rows.iterrows()):
         with cols[n % ncol], st.container(key=f"lc_{key}_{i}" if key else None):
-            ui.listing_card(r, int(i), QL(r.get("quan")))
+            ui.listing_card(r, int(i), QL(r.get("quan")), public=not IS_KD, badge=badge(i) if badge else None)
             if key:
                 st.button(f"Xem chi tiết: {r['tieu_de'][:60]}", key=f"open_{key}_{i}",
-                          on_click=go, args=(MENU[2], i))
+                          on_click=go, args=(PG_CHI_TIET, i))
+
+
+def paged(v, pkey, per=12):
+    """Phân trang lưới thẻ: trả về lát dữ liệu của trang hiện tại + vẽ ô chọn trang."""
+    n_page = max(1, int(np.ceil(len(v) / per)))
+    page = min(ss.get(pkey, 1), n_page)
+    return v.iloc[(page - 1) * per: page * per], n_page
 
 
 # ======================================================================
-# Sidebar
+# Sidebar: chọn vai trò (+ mã truy cập kiểm duyệt), menu theo vai trò
 # ======================================================================
 st.sidebar.image(P("images", "nhatot.jpg"), width="stretch")
-st.sidebar.radio("Menu", MENU, key="nav", label_visibility="collapsed")
+st.sidebar.radio("Bạn là", [ROLE_BAN, ROLE_KD], key="role_pick", horizontal=True, on_change=on_role_change)
+if ss.role_pick == ROLE_KD and not ss.mod_ok:
+    code, from_secret = _mod_code()
+    with st.sidebar.form("mod_login", border=False):
+        typed = st.text_input("Mã truy cập kiểm duyệt", type="password")
+        if st.form_submit_button("Vào khu kiểm duyệt", type="primary"):
+            if hmac.compare_digest(typed.strip(), code):
+                ss.mod_ok = True
+                ss.nav = PG_HOME_KD
+                st.rerun()
+            else:
+                st.error("Sai mã truy cập.")
+    if not from_secret:
+        st.sidebar.caption("Bản demo: mã là `kiemduyet2026`.")
+    st.sidebar.caption("Chưa đăng nhập → đang xem với vai trò Người bán.")
+st.sidebar.radio("Menu", MENU[ROLE], key="nav", label_visibility="collapsed")
+if IS_KD:
+    n_wait = int((~queue().da_xu_ly).sum())
+    st.sidebar.caption(f"🛡️ Đang ở khu kiểm duyệt · {n_wait} tin chờ duyệt")
+    st.sidebar.button("Thoát khu kiểm duyệt", on_click=logout)
 st.sidebar.divider()
 ui.team_sidebar(TEAM)
 st.sidebar.caption("Đồ án tốt nghiệp Data Science — TTTH ĐH KHTN")
 st.sidebar.markdown('<div class="z-note">Sản phẩm học tập, dùng dữ liệu tin đăng Nhà Tốt cho mục đích nghiên cứu — '
-                    'không phải website chính thức của Nhà Tốt / Chợ Tốt.</div>', unsafe_allow_html=True)
+                    'không phải website chính thức của Nhà Tốt / Chợ Tốt. Phân quyền ở mức demo: mã truy cập '
+                    'chỉ tách giao diện, không thay cho hệ thống đăng nhập thật.</div>', unsafe_allow_html=True)
 choice = ss.nav
 THR = SCORER.threshold()
 
-# ----------------------------------------------------------------------
-if choice == MENU[0]:
-    ui.html('<div class="z-hero"><h1>Định giá nhà. Phát hiện giá bất thường.</h1>'
-            '<p>7.926 tin rao bán nhà riêng tại Bình Thạnh · Gò Vấp · Phú Nhuận (TP.HCM) — '
-            'mô hình XGBoost ước tính giá, 4 tín hiệu thống kê & ML gắn cờ tin quá rẻ / quá đắt.</p></div>')
-    m = B["metrics_test"]
-    ui.kpis([("Tin dùng để học", ui.vn(B["n_train"], 0)), ("Sai số tuyệt đối TB (MAE)", ui.ty(m["MAE"])),
-             ("R² trên tập test", ui.vn(m["R2"], 3)),
-             ("Tin bị gắn cờ", f"{int(SC.flag_bat_thuong.sum())} ({SC.flag_bat_thuong.mean():.0%})")])
-    c = st.columns(3)
-    for col, (icon, title, txt, page) in zip(c, [
-            ("🔎", "Tìm nhà", "Lọc tin theo quận, phường, giá, số phòng — mỗi tin có nhãn giá tốt / bất thường.", MENU[1]),
-            ("💰", "Định giá nhà", "Nhập thông tin căn nhà → giá ước tính AI, khoảng tham khảo và kiểm tra giá bạn định đăng.", MENU[3]),
-            ("🚨", "Kiểm tra hàng loạt", "Upload file CSV tin đăng → chấm 4 tín hiệu bất thường cho từng tin.", MENU[4])]):
-        with col, st.container(border=True, key=f"card_home_{title}"):
-            ui.html(f'<div style="font-size:2rem">{icon}</div><div class="z-h2" style="margin-top:4px">{title}</div>'
-                    f'<div class="z-txt">{txt}</div>')
-            st.button(f"Mở {title.lower()} →", key=f"home_{page}", on_click=go, args=(page,), type="primary")
-    ui.html('<div class="z-h2">Tin nghi vấn nhất</div>')
-    grid(SC[SC.flag_bat_thuong == 1].sort_values("total_score", ascending=False).head(3), "home")
 
-# ----------------------------------------------------------------------
-elif choice == MENU[1]:
+def page_search(public):
+    """Tìm nhà. public=True (người bán): ẩn tin chờ kiểm duyệt, bỏ lọc/sắp xếp theo mức nghi vấn."""
     f = st.columns([1.1, 1.1, 1.3, 1.6, 0.9, 1.1])
     quan = f[0].selectbox("Quận", ["Tất cả"] + CH["quan"], format_func=lambda q: "Tất cả quận" if q == "Tất cả" else QL(q))
     phuong = f[1].selectbox("Phường", ["Tất cả"] + (CH["phuong_by_quan"][quan] if quan != "Tất cả" else []),
@@ -233,8 +345,8 @@ elif choice == MENU[1]:
     loai = f[2].selectbox("Loại hình", ["Tất cả"] + CH["loai_hinh"])
     gia = f[3].slider("Giá (tỷ)", 0.0, 50.0, (0.0, 50.0), 0.5)
     pn = f[4].selectbox("PN tối thiểu", [0, 1, 2, 3, 4, 5], format_func=lambda x: "Bất kỳ" if x == 0 else f"{x}+")
-    trang_thai = f[5].selectbox("Trạng thái giá", ["Tất cả", "Giá tốt", "Bất thường"])
-    v = SC
+    trang_thai = f[5].selectbox("Trạng thái giá", ["Tất cả", "Giá tốt"] + ([] if public else ["Bất thường"]))
+    v = VIEW
     if quan != "Tất cả":
         v = v[v.quan == quan]
     if phuong != "Tất cả":
@@ -255,8 +367,8 @@ elif choice == MENU[1]:
     h1.markdown(f'<div class="z-h2" style="margin-top:4px">{escape(title)}</div>'
                 f'<div class="z-meta">{ui.vn(len(v), 0)} tin · giá trung vị '
                 f'{ui.ty(v.gia_ban_ty.median()) if len(v) else "—"}</div>', unsafe_allow_html=True)
-    sort = h2.selectbox("Sắp xếp", ["Giá tốt nhất (so với ước tính)", "Giá thấp → cao", "Giá cao → thấp",
-                                    "Diện tích lớn nhất", "Nghi vấn nhất"])
+    sorts = ["Giá tốt nhất (so với ước tính)", "Giá thấp → cao", "Giá cao → thấp", "Diện tích lớn nhất"]
+    sort = h2.selectbox("Sắp xếp", sorts + ([] if public else ["Nghi vấn nhất"]))
     # "Giá tốt nhất": rẻ nhất so với giá ước tính, nhưng đẩy tin nghi vấn (bị gắn cờ / lệch ≥ 35%) xuống cuối
     key, asc = {"Giá tốt nhất (so với ước tính)": (["suspect", "ratio"], [True, True]),
                 "Giá thấp → cao": ("gia_ban_ty", True), "Giá cao → thấp": ("gia_ban_ty", False),
@@ -265,22 +377,101 @@ elif choice == MENU[1]:
     v = v.assign(ratio=ratio, suspect=(v.flag_bat_thuong == 1) | ((ratio - 1).abs() >= ui.SUSPECT)
                  ).sort_values(key, ascending=asc)
 
-    PER = 12
-    n_page = max(1, int(np.ceil(len(v) / PER)))
-    pkey = f"pg_{quan}_{phuong}_{loai}_{gia}_{pn}_{trang_thai}_{sort}"
-    page = ss.get(pkey, 1)
+    pkey = f"pg_{public}_{quan}_{phuong}_{loai}_{gia}_{pn}_{trang_thai}_{sort}"
+    rows, n_page = paged(v, pkey)
     if len(v):
-        grid(v.iloc[(page - 1) * PER: page * PER], "s")
+        grid(rows, "s", badge=dec_badge if IS_KD else None)
     else:
         st.info("Không có tin phù hợp bộ lọc.")
     if n_page > 1:
         st.number_input(f"Trang (1–{n_page})", 1, n_page, key=pkey)
+    if public:
+        st.caption("Tin có giá lệch bất thường chỉ hiển thị ở đây sau khi đội kiểm duyệt duyệt.")
+
 
 # ----------------------------------------------------------------------
-elif choice == MENU[2]:
+if choice == PG_HOME_BAN:
+    ui.html('<div class="z-hero"><h1>Đăng tin đúng giá, bán nhanh hơn.</h1>'
+            '<p>Nhập thông tin căn nhà → mô hình XGBoost học từ 7.926 tin rao bán tại Bình Thạnh · Gò Vấp · '
+            'Phú Nhuận (TP.HCM) gợi ý giá đăng và khoảng giá tham khảo.</p></div>')
+    m = B["metrics_test"]
+    ui.kpis([("Tin dùng để học", ui.vn(B["n_train"], 0)), ("Sai số tuyệt đối TB (MAE)", ui.ty(m["MAE"])),
+             ("R² trên tập test", ui.vn(m["R2"], 3)), ("Khoảng giá tham khảo", "80%")])
+    c = st.columns(2)
+    for col, (icon, title, txt, page) in zip(c, [
+            ("💰", "Định giá nhà", "Nhập thông tin căn nhà → giá ước tính, khoảng tham khảo 80% và kiểm tra giá bạn định đăng.", PG_DINH_GIA),
+            ("🔎", "Tham khảo giá khu vực", "Xem tin đang rao cùng quận, phường, loại hình để so với căn của bạn.", PG_THAM_KHAO)]):
+        with col, st.container(border=True, key=f"card_home_{title}"):
+            ui.html(f'<div style="font-size:2rem">{icon}</div><div class="z-h2" style="margin-top:4px">{title}</div>'
+                    f'<div class="z-txt">{txt}</div>')
+            st.button(f"Mở {title.lower()} →", key=f"home_{title}", on_click=go, args=(page,), type="primary")
+    ui.html('<div class="z-h2">Tin giá tốt so với ước tính</div>')
+    pub = VIEW.assign(ratio=VIEW.gia_ban_ty / VIEW.y_pred)
+    # Rẻ hơn ước tính 10–25% và 4 tín hiệu đều thấp nhất -> "giá tốt" đáng tin, không phải tin sát ranh giới nghi vấn
+    grid(pub[pub.ratio.between(0.75, 0.9)].sort_values("total_score").head(3), "home")
+
+# ----------------------------------------------------------------------
+elif choice == PG_HOME_KD:
+    q = queue()
+    n_wait = int((~q.da_xu_ly).sum())
+    ui.html('<div class="z-hero"><h1>Khu kiểm duyệt giá bất thường</h1>'
+            f'<p>{len(q)} tin bị gắn cờ (top 5% composite score trên 7.926 tin) · {n_wait} tin chờ duyệt. '
+            'Mỗi tin kèm 4 tín hiệu để kiểm duyệt viên quyết định duyệt, hỏi lại hay gỡ tin.</p></div>')
+    hc = q["huong"].value_counts()
+    ui.kpis([("Tin bị gắn cờ", f"{len(q)} ({len(q) / len(SC):.0%})"), ("Chờ duyệt", str(n_wait)),
+             ("Quá rẻ / quá đắt", f"{hc.get('QUÁ RẺ', 0)} / {hc.get('QUÁ ĐẮT', 0)}"),
+             ("Ngưỡng composite", f"{THR:.3f}")])
+    c = st.columns(3)
+    for col, (icon, title, txt, page) in zip(c, [
+            ("🚩", "Hàng đợi duyệt", "Tin bị gắn cờ, điểm cao nhất trước; mở từng tin để xem tín hiệu và ra quyết định.", PG_HANG_DOI),
+            ("🚨", "Kiểm tra hàng loạt", "Upload file CSV tin mới → chấm 4 tín hiệu, chỉnh trọng số và ngưỡng top-k%.", PG_BATCH),
+            ("📒", "Nhật ký duyệt", "Các quyết định trong phiên làm việc; tải về CSV.", PG_NHAT_KY)]):
+        with col, st.container(border=True, key=f"card_kd_{title}"):
+            ui.html(f'<div style="font-size:2rem">{icon}</div><div class="z-h2" style="margin-top:4px">{title}</div>'
+                    f'<div class="z-txt">{txt}</div>')
+            st.button(f"Mở {title.lower()} →", key=f"kd_{title}", on_click=go, args=(page,), type="primary")
+    ui.html('<div class="z-h2">Chờ duyệt — nghi vấn nhất</div>')
+    grid(q[~q.da_xu_ly].head(3), "kdhome")
+
+# ----------------------------------------------------------------------
+elif choice == PG_THAM_KHAO:
+    page_search(public=True)
+
+elif choice == PG_TAT_CA:
+    page_search(public=False)
+
+# ----------------------------------------------------------------------
+elif choice == PG_HANG_DOI:
+    q = queue()
+    f = st.columns([1.2, 1.2, 1.4, 1.2])
+    quan = f[0].selectbox("Quận", ["Tất cả"] + CH["quan"], format_func=lambda x: "Tất cả quận" if x == "Tất cả" else QL(x),
+                          key="q_quan")
+    huong = f[1].selectbox("Chiều lệch", ["Tất cả", "QUÁ ĐẮT", "QUÁ RẺ"], key="q_huong")
+    tt = f[2].selectbox("Trạng thái", ["Chờ duyệt", "Đã xử lý", "Tất cả"], key="q_tt")
+    if quan != "Tất cả":
+        q = q[q.quan == quan]
+    if huong != "Tất cả":
+        q = q[q.huong == huong]
+    if tt == "Chờ duyệt":
+        q = q[~q.da_xu_ly]
+    elif tt == "Đã xử lý":
+        q = q[q.da_xu_ly]
+    f[3].markdown(f'<div class="z-meta" style="margin-top:34px">{len(q)} tin · sắp theo composite score</div>',
+                  unsafe_allow_html=True)
+    pkey = f"pgq_{quan}_{huong}_{tt}"
+    rows, n_page = paged(q, pkey)
+    if len(q):
+        grid(rows, "q", badge=dec_badge)
+    else:
+        st.success("Không còn tin nào trong mục này.")
+    if n_page > 1:
+        st.number_input(f"Trang (1–{n_page})", 1, n_page, key=pkey)
+
+# ----------------------------------------------------------------------
+elif choice == PG_CHI_TIET:
     top = st.columns([1, 4])
-    top[0].button("← Danh sách", on_click=go, args=(MENU[1],))
-    opts = SC.index.tolist()
+    top[0].button("← Hàng đợi" if IS_KD else "← Danh sách", on_click=go, args=(PG_HANG_DOI if IS_KD else PG_THAM_KHAO,))
+    opts = VIEW.index.tolist()
     sel = top[1].selectbox("Chọn tin", opts, index=opts.index(ss.listing), label_visibility="collapsed",
                            format_func=lambda i: f"{SC.at[i, 'tieu_de'][:90]} — {ui.ty(SC.at[i, 'gia_ban_ty'])}")
     ss.listing = int(sel)
@@ -317,7 +508,8 @@ elif choice == MENU[2]:
     with main:
         lo, hi = ui.vn(est_range(r["y_pred"])[0], 2), ui.ty(est_range(r["y_pred"])[1])
         c1, c2 = st.columns([1.5, 1])
-        c1.markdown(f'<span class="z-status"><span class="z-dot"></span>Đang rao bán</span> {ui.price_status(r)}'
+        c1.markdown(f'<span class="z-status"><span class="z-dot"></span>Đang rao bán</span> '
+                    f'{dec_badge(i) or ui.price_status(r, public=not IS_KD)}'
                     f'<div class="z-price">{ui.ty(r["gia_ban_ty"])}</div>'
                     f'<div class="z-addr">{escape(str(r["dia_chi"]).split(" (")[0])}</div>', unsafe_allow_html=True)
         c2.markdown('<div class="z-stats" style="margin-top:34px">'
@@ -328,6 +520,27 @@ elif choice == MENU[2]:
         ui.html(f'<div class="z-est"><span>🤖 Giá ước tính AI: <b>{ui.ty(r["y_pred"])}</b></span>'
                 f'<span>Khoảng 80%: <b>{lo} – {hi}</b></span>'
                 f'<span>Trả góp ước tính: <b>{ui.vn(ui.monthly(r["gia_ban_ty"]), 0)} tr/tháng</b></span></div>')
+
+        # ---- [Kiểm duyệt] khối ra quyết định, đặt lên đầu để không phải cuộn ----
+        if IS_KD:
+            ui.html('<div class="z-h2">Đánh giá giá đăng</div>')
+            ui.card(price_check(r, THR))
+            if r["flag_bat_thuong"] == 1:
+                with st.container(border=True, key="card_decide"):
+                    d = ss.dec.get(i)
+                    ui.html('<div class="z-h2" style="margin-top:0;font-size:1.1rem">Quyết định kiểm duyệt</div>'
+                            + (f'<div class="z-meta">Đã xử lý lúc {d["luc"]}: {dec_badge(i)}'
+                               + (f' — {escape(d["ghi_chu"])}' if d["ghi_chu"] else "") + "</div>" if d else ""))
+                    st.text_input("Ghi chú (tuỳ chọn)", key=f"note_{i}",
+                                  placeholder="vd: mặt tiền kinh doanh, giá hợp lý; hoặc nghi gõ thừa chữ số")
+                    b = st.columns(3)
+                    for col, (k, (lab, _)) in zip(b, QD.items()):
+                        col.button(lab, key=f"qd_{k}_{i}", on_click=decide, args=(i, k), width="stretch",
+                                   type="primary" if k == "duyet" else "secondary")
+                    st.caption("Bấm quyết định sẽ tự mở tin chờ duyệt tiếp theo. Quyết định chỉ lưu trong phiên "
+                               "làm việc này (bản demo chưa có cơ sở dữ liệu) — tải về ở trang Nhật ký duyệt.")
+            else:
+                st.caption("Tin này không bị gắn cờ nên không nằm trong hàng đợi kiểm duyệt.")
 
         def fact(icon, label, val):
             return f'<div class="z-fact"><span class="i">{icon}</span><div><small>{label}</small>{escape(str(val))}</div></div>'
@@ -349,8 +562,9 @@ elif choice == MENU[2]:
                 f'{escape(str(r["tieu_de"]))}</div><div class="z-txt">{escape(flat[:420])}'
                 + (f'…<details><summary>Xem thêm</summary>{full}</details>' if len(flat) > 420 else "") + "</div>")
 
-        ui.html('<div class="z-h2">Đánh giá giá đăng</div>')
-        ui.card(price_check(r, THR))
+        if not IS_KD:
+            ui.html('<div class="z-h2">So với giá ước tính</div>')
+            ui.card(price_check_ban(r))
 
         if len(hist) >= 2:
             st.caption(f"Đơn giá/m² khu vực {'tăng' if hist[-1] >= hist[0] else 'giảm'} "
@@ -368,18 +582,19 @@ elif choice == MENU[2]:
         ui.card('<div class="z-dl">' + "".join(f'<div><span>{a}</span><b>{escape(str(b))}</b></div>' for a, b in rows) + "</div>")
 
         ui.html('<div class="z-h2">Nhà tương tự gần đây</div>')
-        same = SC[(SC.quan == r["quan"]) & (SC.index != i)]
+        same = VIEW[(VIEW.quan == r["quan"]) & (VIEW.index != i)]
         d = (np.abs(np.log(same.dien_tich_m2.clip(lower=5)) - np.log(max(r["dien_tich_m2"], 5)))
              + 0.15 * (same.so_phong_ngu_n.fillna(3) - (r["so_phong_ngu_n"] if pd.notna(r["so_phong_ngu_n"]) else 3)).abs()
              + 0.4 * (same.phuong != r["phuong"]) + 0.4 * (same.loai_hinh != r["loai_hinh"]))
-        grid(same.loc[d.nsmallest(3).index], "sim")
+        grid(same.loc[d.nsmallest(3).index], "sim", badge=dec_badge if IS_KD else None)
 
     with side:
         with st.container(border=True, key="card_agent"):
             ui.html(f'<div class="z-agent"><div class="z-ava">NT</div><div><div class="z-meta">Tin đăng trên</div>'
                     f'<b>Nhà Tốt · Chợ Tốt</b><div class="z-meta">Mã tin #{i}</div></div></div>')
-            st.button("💰 Định giá căn tương tự", type="primary", width="stretch", on_click=go, args=(MENU[3],))
-            st.button("🔎 Xem nhà cùng khu vực", width="stretch", on_click=go, args=(MENU[1],))
+            st.button("💰 Định giá căn tương tự", type="primary", width="stretch", on_click=go, args=(PG_DINH_GIA,))
+            st.button("🔎 Xem nhà cùng khu vực", width="stretch", on_click=go,
+                      args=(PG_TAT_CA if IS_KD else PG_THAM_KHAO,))
         with st.container(border=True, key="card_loan"):
             ui.html('<div class="z-h2" style="margin-top:0;font-size:1.1rem">Ước tính trả góp</div>')
             down = st.slider("Trả trước (%)", 10, 90, 30, 5, key="m_down")
@@ -392,10 +607,10 @@ elif choice == MENU[2]:
                     f'{ui.ty(pay * years * 12 / 1000 - r["gia_ban_ty"] * (1 - down / 100))}</div>')
 
 # ----------------------------------------------------------------------
-elif choice == MENU[3]:
+elif choice == PG_DINH_GIA:
     ui.html('<div class="z-h2" style="font-size:1.9rem;margin-top:0">Căn nhà của bạn đáng giá bao nhiêu?</div>'
-            '<div class="z-meta">Nhập thông tin → mô hình XGBoost ước tính giá. Nhập thêm giá bạn định đăng để kiểm tra '
-            'có bị xem là bất thường không.</div>')
+            '<div class="z-meta">Nhập thông tin → mô hình XGBoost ước tính giá. Nhập thêm giá bạn định đăng để biết '
+            'giá đó có hợp lý so với thị trường không.</div>')
     st.write("")
     tab1, tab2 = st.tabs(["Định giá 1 căn", "Định giá từ file CSV / Excel"])
     with tab1:
@@ -447,7 +662,7 @@ elif choice == MENU[3]:
                     out, thr = SCORER.score(row, yp)
                     rr = pd.concat([row, out], axis=1).iloc[0]
                     ui.html('<div class="z-h2">Kiểm tra giá bạn định đăng</div>')
-                    ui.card(price_check(rr, thr))
+                    ui.card(price_check(rr, thr) if IS_KD else price_check_ban(rr))
             else:
                 ui.card('<div class="z-h2" style="margin-top:0">Cách ước tính</div><div class="z-txt">'
                         'Mô hình <b>XGBoost</b> học từ 7.878 tin rao bán (6.302 train / 1.576 test) với 16 đặc trưng: diện tích, số phòng, '
@@ -491,7 +706,7 @@ elif choice == MENU[3]:
                 st.error(f"Không xử lý được file: {e}")
 
 # ----------------------------------------------------------------------
-elif choice == MENU[4]:
+elif choice == PG_BATCH:
     ui.html('<div class="z-h2" style="font-size:1.9rem;margin-top:0">Kiểm tra giá hàng loạt</div>'
             '<div class="z-meta">Upload danh sách tin có giá → mỗi tin được chấm 4 tín hiệu, cộng có trọng số thành '
             'composite score và so với 7.926 tin tham chiếu; top-5% bị gắn cờ.</div>')
@@ -537,7 +752,30 @@ elif choice == MENU[4]:
             st.error(f"Không xử lý được file: {e}")
 
 # ----------------------------------------------------------------------
-elif choice == MENU[5]:
+elif choice == PG_NHAT_KY:
+    ui.html('<div class="z-h2" style="font-size:1.9rem;margin-top:0">Nhật ký duyệt</div>'
+            '<div class="z-meta">Quyết định trong phiên làm việc này. Bản demo chưa có cơ sở dữ liệu: tải CSV về '
+            'trước khi đóng trình duyệt.</div>')
+    if not ss.dec:
+        st.info("Chưa có quyết định nào. Mở Hàng đợi duyệt để bắt đầu.")
+        st.button("Mở hàng đợi duyệt →", on_click=go, args=(PG_HANG_DOI,), type="primary")
+    else:
+        log = pd.DataFrame([{"ma_tin": i, "quyet_dinh": QD[d["qd"]][0], "ghi_chu": d["ghi_chu"], "luc": d["luc"],
+                             "tieu_de": SC.at[i, "tieu_de"], "gia_dang_ty": round(SC.at[i, "gia_ban_ty"], 2),
+                             "gia_uoc_tinh_ty": round(SC.at[i, "y_pred"], 2), "huong": SC.at[i, "huong"],
+                             "composite": round(SC.at[i, "total_score"], 3)} for i, d in ss.dec.items()])
+        cnt = log["quyet_dinh"].value_counts()
+        ui.kpis([("Đã xử lý", str(len(log)))] + [(lab, str(int(cnt.get(lab, 0)))) for lab, _ in QD.values()])
+        st.dataframe(log, width="stretch", hide_index=True)
+        c1, c2 = st.columns([1, 1])
+        c1.download_button("⬇️ Tải nhật ký CSV", log.to_csv(index=False).encode("utf-8-sig"),
+                           "nhat_ky_kiem_duyet.csv", "text/csv", type="primary")
+        if c2.button("Xoá nhật ký"):
+            ss.dec = {}
+            st.rerun()
+
+# ----------------------------------------------------------------------
+elif choice == PG_DATA:
     BANG = pd.read_csv(P("data", "bang_so_sanh_model.csv"))
     KL = load_ket_luan()
     _spark = (BANG["env"] != "scikit-learn").any()
@@ -612,7 +850,7 @@ else:
 # ======================================================================
 if "_toast" in ss:
     st.toast(ss.pop("_toast"), icon="🏡")
-view = (ss.nav, ss.listing if ss.nav == MENU[2] else None)
+view = (ss.nav, ss.listing if ss.nav == PG_CHI_TIET else None)
 if ss.get("_last_view") != view:
     ss._last_view = view
     ss._scroll_n = ss.get("_scroll_n", 0) + 1     # nội dung khác nhau mỗi lần -> script chạy lại

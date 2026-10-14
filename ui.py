@@ -161,12 +161,15 @@ def card(s):
     html(f'<div class="z-card">{s}</div>')
 
 
-def price_status(r):
-    """Nhãn trạng thái giá: theo cờ bất thường trước, sau đó theo % lệch so với giá ước tính."""
-    if r.get("flag_bat_thuong") == 1:
+def price_status(r, public=False):
+    """Nhãn trạng thái giá: theo cờ bất thường trước, sau đó theo % lệch so với giá ước tính.
+    public=True (người bán / người xem): KHÔNG hiện nhãn kiểm duyệt (nghi bất thường, cần kiểm tra)."""
+    if not public and r.get("flag_bat_thuong") == 1:
         return f'<span class="z-badge z-bad">⚠ Nghi {escape(str(r["huong"]).lower())}</span>'
     lech = r["gia_ban_ty"] / r["y_pred"] - 1
     if abs(lech) >= SUSPECT:      # lệch quá xa nhưng composite chưa tới ngưỡng -> không gọi là "giá tốt"
+        if public:
+            return '<span class="z-badge z-mid">Chênh nhiều so với ước tính</span>'
         return f'<span class="z-badge z-hi">Cần kiểm tra ({lech:+.0%})</span>'
     if lech <= -0.10:
         return '<span class="z-badge z-good">✓ Giá tốt</span>'
@@ -216,10 +219,10 @@ def specs(r):
     return " | ".join(out)
 
 
-def listing_card(r, idx, quan_label):
+def listing_card(r, idx, quan_label, public=False, badge=None):
     addr = ", ".join(x for x in [r.get("phuong"), quan_label] if isinstance(x, str) and x)
     html(f'<div class="z-lcard"><div class="img" style="background-image:url({house_img(r["loai_hinh"], True, idx)})">'
-         f'{price_status(r)}</div>'
+         f'{badge or price_status(r, public)}</div>'
          # Thứ tự như thẻ tin trên nhatot.com: tiêu đề → phòng · loại hình → giá + đơn giá + m² → khu vực
          f'<div class="bd"><div class="t" title="{escape(str(r["tieu_de"]))}">{escape(str(r["tieu_de"]))}</div>'
          f'<div class="s">{specs(r)} · {escape(str(r["loai_hinh"]))}</div>'
