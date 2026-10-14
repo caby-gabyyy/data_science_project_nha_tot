@@ -1,0 +1,69 @@
+{
+  "dang_ke": false,
+  "top1": {
+    "model": "XGBoost_tuned",
+    "env": "scikit-learn"
+  },
+  "ngang": [
+    {
+      "model": "XGBoost_tuned",
+      "env": "scikit-learn",
+      "RMSE": 2.1067692913609273
+    },
+    {
+      "model": "XGBoost",
+      "env": "scikit-learn",
+      "RMSE": 2.1384533461707496
+    },
+    {
+      "model": "LightGBM",
+      "env": "scikit-learn",
+      "RMSE": 2.193693156603658
+    }
+  ],
+  "de_xuat": {
+    "model": "XGBoost_tuned",
+    "env": "scikit-learn"
+  },
+  "bien_do": 0.05311247531855712,
+  "seeds": [
+    42,
+    0,
+    1,
+    7,
+    2024
+  ],
+  "so_cap_voi": "XGBoost_tuned",
+  "so_cap": [
+    {
+      "doi_thu": "XGBoost",
+      "chenh_tb": -0.002237963693242451,
+      "std_chenh": 0.02655623765927856,
+      "thang": "2/5",
+      "vung": false
+    },
+    {
+      "doi_thu": "LightGBM",
+      "chenh_tb": 0.05154856518961628,
+      "std_chenh": 0.03433007962916584,
+      "thang": "4/5",
+      "vung": false
+    },
+    {
+      "doi_thu": "RandomForest",
+      "chenh_tb": 0.07259119341213083,
+      "std_chenh": 0.029260217913191968,
+      "thang": "5/5",
+      "vung": true
+    }
+  ],
+  "baseline": {
+    "mo_ta": "đơn giá trung vị theo phường (lùi về quận) × diện tích, tính trên train",
+    "MAE": 2.133392773134518,
+    "RMSE": 3.2443033663192375,
+    "R2": 0.5889703815507994,
+    "MAPE_%": 27.225249776812287
+  },
+  "cai_thien_baseline_pct": 35.062506384810675,
+  "cai_thien_model": "XGBoost_tuned"
+}
